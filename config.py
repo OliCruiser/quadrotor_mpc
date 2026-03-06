@@ -1,23 +1,40 @@
-from jax.config import config
-config.update("jax_enable_x64", True)   # enable float64 types for accuracy
+import jax
+from jax import config as jax_config
+
+# 启用 float64（双精度），提高优化与仿真的数值稳定性
+jax_config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 
+# =========================
+# 系统与控制维度
+# 12个状态维度：位置(3), 速度(3), 姿态MRP(3), 角速度(3)
+# 4个控制输入：4个电机推力
+# =========================
+Nx = 12             # 状态维度（四旋翼状态总数）
+Nu = 4              # 控制输入维度（4 个电机/推力通道）
+# =========================
+# 时域相关参数
+# =========================
+N = 250             # 参考轨迹总步数
+N_mpc = 40          # MPC 预测时域长度（每次优化向前看 40 步）
+dt = 0.1            # 离散时间步长（秒）
+N_sim = 100         # 仿真总步数
 
-Nx = 12             # Number of states
-Nu = 4              # Number of controls
-N = 250             # Timesteps of reference trajectory
-N_mpc = 40          # MPC prediction horizon
-dt = 0.1            # Discretization step
-N_sim = 100         # Simulation timesteps
-# N_sim = N + N_mpc   # Simulation timesteps
+# 初始状态 x0 = [位置(3), 速度(3), 姿态MRP(3), 角速度(3)]
+x0 = jnp.array([0.0, 0.0, 1.2, 
+                0, 0, 0, 
+                0, 0, 0, 
+                0, 0, 0])
 
-x0 = jnp.array([0.0, 0.0, 1.2, 0, 0, 0, 0, 0, 0,  0, 0, 0])  # Initial state
+# =========================
+# 代价函数权重
+# =========================
+Q = 100 * jnp.eye(Nx)    # 状态误差权重矩阵（越大越强调跟踪）
+R = 0.0001 * jnp.eye(Nu)   # 控制输入权重矩阵（越大越抑制控制幅值）
 
-# Cost weights
-Q = 10*jnp.eye(Nx)
-R = 0.1*jnp.eye(Nu)
-
-# Input bounds
-u_min = jnp.zeros(Nu)
-u_max = 10*jnp.ones(Nu)
+# =========================
+# 输入约束（每个输入通道）
+# =========================
+u_min = jnp.zeros(Nu)       # 输入下界：0
+u_max = 10 * jnp.ones(Nu)   # 输入上界：10

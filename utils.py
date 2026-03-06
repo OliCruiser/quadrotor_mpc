@@ -1,13 +1,16 @@
-from jax.config import config
-config.update("jax_enable_x64", True)   # enable float64 types for accuracy
+import jax
+# 1. 导入 JAX 配置并重命名为 jax_config
+from jax import config as jax_config 
+# 2. 使用新名字进行更新
+jax_config.update("jax_enable_x64", True)   
 
 import numpy as np
 import jax.numpy as jnp
 from jax import jit, jacfwd
 import pandas as pd
 
+# 3. 导入项目本地的配置文件 config.py
 import config
-
 
 @jit
 def skew(v):
@@ -117,52 +120,78 @@ def quadrotor_rk4(x, u, Ts):
 
 
 def get_linearized_dynamics_matrices(X_ref, U_ref, Ts):
-    """Linearizes dynamics about reference trajectory.
+    """沿参考轨迹对离散动力学进行线性化，得到每一步的 A、B 矩阵。
 
-    Inputs:
-      - X_ref(np.ndarray): The state reference trajectory    [12xN]
-      - U_ref(np.ndarray): The controls reference trajectory [4xN]
-    Returns:
-      - Ad(np.ndarray): The linearized state matrix at each timestep     [12x12xN]
-      - Bd(np.ndarray): The linearized controls matrix at each timestep  [12x4xN]
+    参数:
+      - X_ref(np.ndarray): 状态参考轨迹，形状 [12, N]
+      - U_ref(np.ndarray): 控制参考轨迹，形状 [4, N]（或至少第二维可按 i 索引）
+      - Ts(float): 离散时间步长
+    返回:
+      - Ad(np.ndarray): 每一步的状态雅可比矩阵 A，形状 [12, 12, N]
+      - Bd(np.ndarray): 每一步的输入雅可比矩阵 B，形状 [12, 4, N]
     """
-    Nx = X_ref.shape[0]
-    Nu = U_ref.shape[0]
-    N_mpc = X_ref.shape[1]
+    # 读取维度信息
+    Nx = X_ref.shape[0]      # 状态维度（通常 12）
+    Nu = U_ref.shape[0]      # 控制维度（通常 4）
+    N = X_ref.shape[1]   # 时域长度 N
 
-    Ad = np.zeros((Nx, Nx, N_mpc))
-    Bd = np.zeros((Nx, Nu, N_mpc))
-    for i in range(N_mpc-1):
+    # 预分配线性化结果容器
+    Ad = np.zeros((Nx, Nx, N))
+    Bd = np.zeros((Nx, Nu, N))
+
+    # 对每个时刻 i 的 (x_i, u_i) 做一次线性化
+    # jacfwd(..., 0): 对第 1 个参数 x 求导 => A_i = ∂f/∂x
+    # jacfwd(..., 1): 对第 2 个参数 u 求导 => B_i = ∂f/∂u
+    for i in range(N - 1):
         Ad[:, :, i] = jacfwd(quadrotor_rk4, 0)(X_ref[:, i], U_ref[:, i], Ts)  # [12x12]
         Bd[:, :, i] = jacfwd(quadrotor_rk4, 1)(X_ref[:, i], U_ref[:, i], Ts)  # [12x4]
+
     return Ad, Bd
 
 
+# 表征轨迹
 def get_ref_trajectory():
-    """Computes the reference trajectories."""
-    x0 = config.x0
-    Nx = config.Nx
-    Nu = config.Nu
-    N = config.N
-    dt = config.dt
+    """生成参考轨迹（给 MPC 跟踪）和线性化轨迹（给模型线性化用）。"""
+    # 从配置文件读取参数
+    x0 = config.x0      # 初始状态，长度 Nx
+    Nx = config.Nx      # 状态维度（这里是 12）
+    Nu = config.Nu      # 控制维度（这里是 4）
+    N = config.N        # 轨迹总步数
+    dt = config.dt      # 采样时间
 
-    # Trajectory to linearize dynamics about
-    X_lin_ref = jnp.tile(x0.reshape(Nx, 1), (1, N))  # nxN
-    U_lin_ref = jnp.tile((9.81*0.5/4)*jnp.ones(Nu).reshape(Nu, 1), (1, N - 1))  # mx(N-1)
+    # ===== 1) 线性化参考轨迹(固定点线性化) =====
+    # 状态线性化参考：每一列都用初始状态 x0（大小 Nx x N），接下来的预测，请全部以‘静止悬停’这个点作为基准进行泰勒展开（线性化）。
+    X_lin_ref = jnp.tile(x0.reshape(Nx, 1), (1, N))
 
-    # Reference trajectory to follow
+    # 控制线性化参考：使用“悬停推力”作为每个电机的基准输入（大小 Nu x (N-1)）
+    # 0.5 是质量，9.81 是重力加速度，除以 4 表示四个电机平均分担
+    U_lin_ref = jnp.tile((9.81 * 0.5 / 4) * jnp.ones(Nu).reshape(Nu, 1), (1, N - 1))
+
+    # ===== 2) 跟踪参考轨迹 =====
+    # 这里直接用同一份控制参考
     U_ref = U_lin_ref
+
+    # 状态参考（Nx x N），后面逐列填充
     X_ref = np.zeros((Nx, N))
+
+    # 生成一条空间曲线：
+    # x = 5*cos(t), y = 5*cos(t)*sin(t), z = 1.2（恒定高度）
+    # 其余状态：速度先置 0，姿态给极小值，角速度置 0
     i = 0
-    for t in np.linspace(-np.pi/2, 3*np.pi/2 + 4*np.pi, N):
-        X_ref[:, i] = np.hstack(
-            (np.array([5*np.cos(t), 5*np.cos(t)*np.sin(t), 1.2]), np.zeros(3), 1e-9*np.ones(3), np.zeros(3)))
+    for t in np.linspace(-np.pi / 2, 3 * np.pi / 2 + 4 * np.pi, N):
+        pos = np.array([5 * np.cos(t), 5 * np.cos(t) * np.sin(t), 1.2])  # 位置 [x,y,z]
+        vel = np.zeros(3)                                                 # 速度 [vx,vy,vz]（先占位）
+        mrp = 1e-9 * np.ones(3)                                           # 姿态 MRP（避免严格为 0）
+        omega = np.zeros(3)                                               # 角速度 [wx,wy,wz]
+        X_ref[:, i] = np.hstack((pos, vel, mrp, omega))
         i += 1
+
+    # 用前向差分计算参考速度：v_k = (r_{k+1} - r_k) / dt
+    # 只计算到 N-2，因此最后一个时刻速度保持前面的默认值
     for i in range(N - 1):
-        X_ref[3:6, i] = (X_ref[0:3, i + 1] - X_ref[0:3, i])/dt
-
+        X_ref[3:6, i] = (X_ref[0:3, i + 1] - X_ref[0:3, i]) / dt
+    # 此时姿态和角速度仍然是默认值0，保持不变
     return X_ref, U_ref, X_lin_ref, U_lin_ref
-
 
 def save_to_file(x_history, X_ref):
     """Save state trajectory to csv file to visualize with Julia."""
